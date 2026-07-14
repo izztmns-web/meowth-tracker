@@ -214,6 +214,9 @@
   <div class="spacer"></div>
   <button id="themeToggle" title="Toggle dark mode">🌙</button>
   <button id="addCardBtn">+ Add card / language</button>
+  <button id="exportBtn" title="Download a backup file of your collection">Export backup</button>
+  <button id="importFileBtn" title="Load a backup file into this tracker">Import backup</button>
+  <input type="file" id="importFileInput" accept="application/json" style="display:none;">
   <button class="accent" id="shareBtn">Share link</button>
 </div>
 
@@ -3119,10 +3122,25 @@
   if(hash){
     const decoded = decodeShare(hash);
     if(decoded){
+      // Share links store "owned" as a compact array of owned card ids to keep the URL short;
+      // expand it back into the {id: true} map the rest of the app expects.
+      if(Array.isArray(decoded.owned)){
+        const ownedObj = {};
+        decoded.owned.forEach(id => { ownedObj[id] = true; });
+        decoded.owned = ownedObj;
+      }
       state = Object.assign(defaultState(), decoded);
       viewOnly = true;
       document.getElementById('banner').style.display = 'flex';
       document.getElementById('bannerText').textContent = "You're viewing a shared collection (read-only). You can look around, but nothing here can be changed.";
+    } else {
+      // The hash was present but couldn't be decoded — almost always means the link got cut off
+      // or altered somewhere between "Share link" and here. Say so instead of silently showing
+      // an empty tracker, which looks like a bug but is actually a broken/incomplete link.
+      document.getElementById('banner').style.display = 'flex';
+      document.getElementById('banner').style.background = 'var(--coral)';
+      document.getElementById('bannerText').textContent = "This share link looks broken or incomplete (it was likely cut short when it was copied or sent). Ask whoever sent it to tap Share link again and send the fresh link directly, without retyping or re-copying it.";
+      document.getElementById('importBtn').style.display = 'none';
     }
   }
   if(!state){ state = loadLocalState(); }
@@ -3641,11 +3659,62 @@
 
   // ---- Share ----
   document.getElementById('shareBtn').addEventListener('click', ()=>{
-    const payload = { owned: state.owned, custom: state.custom, order: state.order, overrides: state.overrides, deleted: state.deleted, finishes: state.finishes };
+    // Keep the share URL as short as possible so it survives being pasted through
+    // messaging apps / SMS / address bars without getting cut off: store owned cards
+    // as a compact array of ids instead of a full {id:true/false} map, and drop
+    // trailing empty binder slots.
+    const ownedIds = Object.keys(state.owned).filter(id => state.owned[id]);
+    let order = (state.order || []).slice();
+    while(order.length && order[order.length - 1] === null) order.pop();
+    const payload = { owned: ownedIds, custom: state.custom, order, overrides: state.overrides, deleted: state.deleted, finishes: state.finishes };
     const encoded = encodeShare(payload);
     const url = window.location.origin + window.location.pathname + '#' + encoded;
     navigator.clipboard && navigator.clipboard.writeText(url).catch(()=>{});
     prompt('Share this read-only link with friends (copied to clipboard if supported). They can view your collection and binder, but cannot change anything:', url);
+  });
+
+  // ---- Export / Import backup file (reliable way to move your collection between deployments) ----
+  document.getElementById('exportBtn').addEventListener('click', ()=>{
+    const payload = { owned: state.owned, custom: state.custom, order: state.order, overrides: state.overrides, deleted: state.deleted, finishes: state.finishes };
+    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'meowth-tracker-backup.json';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  });
+
+  document.getElementById('importFileBtn').addEventListener('click', ()=>{
+    document.getElementById('importFileInput').click();
+  });
+
+  document.getElementById('importFileInput').addEventListener('change', (e)=>{
+    const file = e.target.files[0];
+    if(!file) return;
+    const reader = new FileReader();
+    reader.onload = function(evt){
+      try{
+        const data = JSON.parse(evt.target.result);
+        const local = loadLocalState();
+        Object.assign(local.owned, data.owned || {});
+        Object.assign(local.overrides, data.overrides || {});
+        Object.assign(local.finishes, data.finishes || {});
+        (data.custom || []).forEach(c => { if(!local.custom.find(x=>x.id===c.id)) local.custom.push(c); });
+        (data.deleted || []).forEach(id => { if(!local.deleted.includes(id)) local.deleted.push(id); });
+        if(data.order && data.order.length) local.order = data.order.slice();
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(local));
+        alert('Backup imported! Reloading your tracker now.');
+        window.location.hash = '';
+        window.location.reload();
+      }catch(err){
+        alert("Couldn't read that file — make sure it's a backup exported from this tracker (Export backup button).");
+      }
+    };
+    reader.readAsText(file);
+    e.target.value = '';
   });
 
   // ---- Render all ----
