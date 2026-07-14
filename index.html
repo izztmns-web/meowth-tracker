@@ -3071,7 +3071,7 @@
 </script>
 
 <script>
-(function(){
+(async function(){
   const BASE_CARDS = JSON.parse(document.getElementById('cardData').textContent);
   const STORAGE_KEY = 'meowth_tracker_state_v1';
   const THEME_KEY = 'meowth_tracker_theme';
@@ -3105,12 +3105,55 @@
     applyTheme(theme);
   });
 
-  function encodeShare(s){
-    const json = JSON.stringify(s);
-    return btoa(unescape(encodeURIComponent(json)));
+  // ---- URL-safe base64 helpers (no padding, no +//, safe to paste anywhere) ----
+  function bytesToBase64Url(bytes){
+    let binary = '';
+    for(let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+    return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
   }
-  function decodeShare(str){
+  function base64UrlToBytes(str){
+    str = str.replace(/-/g, '+').replace(/_/g, '/');
+    while(str.length % 4) str += '=';
+    const binary = atob(str);
+    const bytes = new Uint8Array(binary.length);
+    for(let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+    return bytes;
+  }
+
+  // ---- Share link encode/decode ----
+  // Modern browsers get gzip-compressed links (much shorter — this data is mostly
+  // repeated "kantonian-meowth-###" style ids, which compresses very well).
+  // Falls back to plain base64 on older browsers, and old links (no prefix) still decode fine.
+  async function encodeShare(s){
+    const json = JSON.stringify(s);
+    if(window.CompressionStream){
+      try{
+        const cs = new CompressionStream('gzip');
+        const writer = cs.writable.getWriter();
+        writer.write(new TextEncoder().encode(json));
+        writer.close();
+        const compressed = new Uint8Array(await new Response(cs.readable).arrayBuffer());
+        return 'gz.' + bytesToBase64Url(compressed);
+      }catch(e){ /* fall through to uncompressed */ }
+    }
+    return 'raw.' + bytesToBase64Url(new TextEncoder().encode(json));
+  }
+  async function decodeShare(str){
     try{
+      if(str.startsWith('gz.')){
+        const bytes = base64UrlToBytes(str.slice(3));
+        const ds = new DecompressionStream('gzip');
+        const writer = ds.writable.getWriter();
+        writer.write(bytes);
+        writer.close();
+        const decompressed = new Uint8Array(await new Response(ds.readable).arrayBuffer());
+        return JSON.parse(new TextDecoder().decode(decompressed));
+      }
+      if(str.startsWith('raw.')){
+        const bytes = base64UrlToBytes(str.slice(4));
+        return JSON.parse(new TextDecoder().decode(bytes));
+      }
+      // Legacy format from links generated before compression support was added.
       const json = decodeURIComponent(escape(atob(str)));
       return JSON.parse(json);
     }catch(e){ return null; }
@@ -3120,7 +3163,7 @@
   let state;
   const hash = window.location.hash.replace(/^#/, '');
   if(hash){
-    const decoded = decodeShare(hash);
+    const decoded = await decodeShare(hash);
     if(decoded){
       // Share links store "owned" as a compact array of owned card ids to keep the URL short;
       // expand it back into the {id: true} map the rest of the app expects.
@@ -3658,16 +3701,16 @@
   });
 
   // ---- Share ----
-  document.getElementById('shareBtn').addEventListener('click', ()=>{
+  document.getElementById('shareBtn').addEventListener('click', async ()=>{
     // Keep the share URL as short as possible so it survives being pasted through
     // messaging apps / SMS / address bars without getting cut off: store owned cards
-    // as a compact array of ids instead of a full {id:true/false} map, and drop
-    // trailing empty binder slots.
+    // as a compact array of ids instead of a full {id:true/false} map, drop
+    // trailing empty binder slots, and gzip-compress the whole thing.
     const ownedIds = Object.keys(state.owned).filter(id => state.owned[id]);
     let order = (state.order || []).slice();
     while(order.length && order[order.length - 1] === null) order.pop();
     const payload = { owned: ownedIds, custom: state.custom, order, overrides: state.overrides, deleted: state.deleted, finishes: state.finishes };
-    const encoded = encodeShare(payload);
+    const encoded = await encodeShare(payload);
     const url = window.location.origin + window.location.pathname + '#' + encoded;
     navigator.clipboard && navigator.clipboard.writeText(url).catch(()=>{});
     prompt('Share this read-only link with friends (copied to clipboard if supported). They can view your collection and binder, but cannot change anything:', url);
